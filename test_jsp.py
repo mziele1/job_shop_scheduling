@@ -20,3 +20,12 @@ class TestConstraints(unittest.TestCase):
         valid_configs = [[1, 0], [0, 1], [0, 0]]
         for config in valid_configs:
             self.assertTrue(jsp_mod.one_at_a_time(*config))
+
+    def test_enforce_precedence(self):
+        invalid_configs = [[1, 1]]
+        for config in invalid_configs:
+            self.assertFalse(jsp_mod.enforce_precedence(*config))
+
+        valid_configs = [[1, 0], [0, 1], [0, 0]]
+        for config in valid_configs:
+            self.assertTrue(jsp_mod.enforce_precedence(*config))
