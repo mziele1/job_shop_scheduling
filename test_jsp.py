@@ -30,6 +30,13 @@ class TestConstraints(unittest.TestCase):
         for config in valid_configs:
             self.assertTrue(jsp_mod.enforce_precedence(*config))
 
+    def test_get_one_hot_configs(self):
+        lengths = [1, 2, 7]
+        for length in lengths:
+            configs = jsp_mod.get_one_hot_configs(length)
+            for config in configs:
+                self.assertEqual(sum(config), 1)
+
 
 class TestCSP(unittest.TestCase):
     def test_simple_jsp(self):
