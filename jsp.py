@@ -10,6 +10,19 @@ def start_once(*args):
     return sum(args) == 1
 
 
+def get_one_hot_configs(length):
+    # this function returns the list of all one-hot configurations with the specified length
+    # compared to the start_once function, this function runs much quicker when using csp.add_constraint
+    #   as the valid configurations are provided, rather than an evaluating function that will be called
+    #   on all 2^n configurations
+    configs = []
+    for i in range(length):
+        config = [0] * length
+        config[i] = 1
+        configs.append(tuple(config))
+    return configs
+
+
 def one_at_a_time(x_i_t, x_k_tprime):
     # this function ensures that the two input start times are NOT both 1
     # input is a pair of operation starting times that would violate the one operation per machine at a time constraint
@@ -60,7 +73,7 @@ class JobShopScheduler:
         # Constraint 1: start once
         for job, ops in job_times_dict.items():
             for op_num, op_times in enumerate(ops, start=1):
-                self.csp.add_constraint(start_once, ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times])
+                self.csp.add_constraint(get_one_hot_configs(len(op_times)), ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times])
 
         # Constraint 2: machine can only execute one operation per time
         machines = set([op[0] for ops in self.job_dict.values()
