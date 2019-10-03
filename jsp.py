@@ -73,7 +73,13 @@ class JobShopScheduler:
         # Constraint 1: start once
         for job, ops in job_times_dict.items():
             for op_num, op_times in enumerate(ops, start=1):
-                self.csp.add_constraint(get_one_hot_configs(len(op_times)), ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times])
+                constraint = dwavebinarycsp.Constraint.from_configurations(
+                    get_one_hot_configs(len(op_times)),
+                    ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times],
+                    vartype="BINARY",
+                    name="start_once"
+                )
+                self.csp.add_constraint(constraint)
 
         # Constraint 2: machine can only execute one operation per time
         machines = set([op[0] for ops in self.job_dict.values()
@@ -117,7 +123,13 @@ class JobShopScheduler:
             ]
             r_m = set(a_m_time_vars + b_m_time_vars)
             for pair in r_m:
-                self.csp.add_constraint(one_at_a_time, [pair[0], pair[1]])
+                constraint = dwavebinarycsp.Constraint.from_func(
+                    one_at_a_time,
+                    [pair[0], pair[1]],
+                    vartype="BINARY",
+                    name="one_at_a_time"
+                )
+                self.csp.add_constraint(constraint)
 
         # Constraint 3, operation precedence
         for job, ops in self.job_dict.items():
@@ -127,7 +139,13 @@ class JobShopScheduler:
                                                      if ((t + self.job_dict[job][i][1]) > tprime)
             ]
             for i, t, k, tprime in precedence_list:
-                self.csp.add_constraint(enforce_precedence, ["x_{}_o{}_t{}".format(job, i + 1, t), "x_{}_o{}_t{}".format(job, k + 1, tprime)])
+                constraint = dwavebinarycsp.Constraint.from_func(
+                    enforce_precedence,
+                    ["x_{}_o{}_t{}".format(job, i + 1, t), "x_{}_o{}_t{}".format(job, k + 1, tprime)],
+                    vartype="BINARY",
+                    name="enforce_precedence"
+                )
+                self.csp.add_constraint(constraint)
 
     def get_times(self):
         """
