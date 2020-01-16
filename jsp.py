@@ -1,6 +1,7 @@
 import dwavebinarycsp
 import itertools
 from abc import ABC, abstractmethod
+import pyqubo
 
 
 class JSP(ABC):
@@ -212,6 +213,74 @@ class DBCJSP(JSP):
                     name="enforce_precedence"
                 )
                 self.csp.add_constraint(constraint)
+
+
+class PyQuboJSP(JSP):
+    """
+    Class to create JSPs using PyQUBO
+    """
+    def __init__(self, job_dict, max_time=None, remove_impossible_times=True, penalty_strength=1):
+        # time_vars are required by bin_vars, which must exist before add_constraints
+        super().__init__(
+            job_dict=job_dict,
+            max_time=max_time,
+            remove_impossible_times=remove_impossible_times)
+        self.bin_vars = self.create_bin_vars()
+        self.start_once_const = 0.0
+        self.machine_cap_const = 0.0
+        self.operation_order_const = 0.0
+
+        self.add_constraints()
+
+        self.penalty_strength = pyqubo.Placeholder("penalty_strength")
+        self.hamiltonian = 0.0 \
+                           + self.penalty_strength \
+                           * (self.start_once_const
+                              + self.machine_cap_const
+                              + self.operation_order_const)
+
+    def create_bin_vars(self):
+        bin_vars = {}
+        for job, ops in self.time_vars.items():
+            bin_vars[job] = {}
+            for op_num, op_times in enumerate(ops, start=1):
+                bin_vars[job][op_num] = {}
+                for op_time in op_times:
+                    bin_vars[job][op_num][op_time] = pyqubo.Binary("x_{}_o{}_t{}".format(job, op_num, op_time))
+        return bin_vars
+
+    def add_start_once_constraints(self, start_times):
+        for job, op_num, op_times in start_times:
+            # constraint is (sum(time_vars) - 1)**2; penalizes more or less than one start time
+            self.start_once_const += \
+                pyqubo.Constraint(
+                    (
+                        pyqubo.Sum(
+                            0,
+                            len(op_times),
+                            lambda t: self.bin_vars[job][op_num][op_times[t]]
+                        ) - 1
+                    ) ** 2,
+                    "start_once_{}_o{}".format(job, op_num)
+                )
+
+    def add_machine_cap_constraints(self, machines):
+        for machine_cap_pairs in machines.values():
+            for i, k in machine_cap_pairs:
+                self.machine_cap_const += \
+                    pyqubo.Constraint(
+                        self.bin_vars[i[0]][i[1]][i[2]] * self.bin_vars[k[0]][k[1]][k[2]],
+                        "machine_cap__{}_{}_{}__{}_{}_{}".format(i[0], i[1], i[2], k[0], k[1], k[2])
+                    )
+
+    def add_precedence_constraints(self, precedence_pairs):
+        for job, pairs in precedence_pairs.items():
+            for i, t, k, tprime in pairs:
+                self.operation_order_const += \
+                    pyqubo.Constraint(
+                        self.bin_vars[job][i + 1][t] * self.bin_vars[job][k + 1][tprime],
+                        "operation_order__{}_{}_{}__{}_{}_{}".format(job, i + 1, t, job, k + 1, tprime)
+                    )
 
 
 def start_once(*args):
