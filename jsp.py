@@ -1,5 +1,217 @@
 import dwavebinarycsp
 import itertools
+from abc import ABC, abstractmethod
+
+
+class JSP(ABC):
+    """
+    A base class used to create JSPs
+    Based on formulation in https://arxiv.org/pdf/1506.08479.pdf
+    """
+    def __init__(self, job_dict, max_time=None, remove_impossible_times=True):
+        """
+        Args:
+            job_dict: A dict of job (string) to operation lists. An operation list is an ordered list of tuples, each
+                representing one operation and containing machine (string) and processing time (int).
+                E.g. {
+                        "j1": [("m1", 2), ("m2", 1), ("m3", 1)],
+                        "j2": [("m3", 2), ("m1", 1), ("m2", 2)],
+                        "j3": [("m2", 1), ("m1", 1), ("m3", 2)]
+                     }
+            max_time: The max allowed time for a schedule.
+            remove_impossible_times: Whether or not to remove (by never creating, as opposed to variable fixing)
+                impossible start/end times for a variable, considering other operations in the same job. E.g. if
+                job1 op1 has p=2, and max_time=7, any schedule where it starts executing in time 7 will be invalid,
+                as by the end of time 7, it will still be executing. This parameter reduces size of the CSP and BQM.
+        """
+        self.job_dict = job_dict
+        self.max_time = max_time if max_time is not None else self.calc_max_time()
+        self.remove_impossible_times = remove_impossible_times
+
+        self.time_vars = self.get_time_vars()
+
+    @abstractmethod
+    def add_start_once_constraints(self, start_times): pass
+
+    @abstractmethod
+    def add_machine_cap_constraints(self, machine_cap_pairs): pass
+
+    @abstractmethod
+    def add_precedence_constraints(self, precedence_pairs): pass
+
+    def add_constraints(self):
+        self.add_start_once_constraints(self.get_op_start_times())
+        self.add_machine_cap_constraints(self.get_machine_cap_pairs())
+        self.add_precedence_constraints(self.get_precedence_pairs())
+
+    def get_op_start_times(self):
+        """
+        Return a list of tuples like (job, op_num, op_times) where op_times is a
+        list of valid start times for the job-op_num combination.
+        """
+        for job, ops in self.time_vars.items():
+            for op_num, op_times in enumerate(ops, start=1):
+                yield(job, op_num, op_times)
+
+    def get_machine_cap_pairs(self):
+        """
+        Create the set a_m: {(i, t, k, t') : (i, k) ∈ I_m × I_m, i != k, 0 ≤ t, t' ≤ T, 0 < t' − t < p_i}
+                       b_m: {(i, t, k, t') : (i, k) ∈ I_m × I_m, i < k, t' = t, p_i > 0, p_j > 0}
+                       for each machine
+        NOTE: These pairs are variables for which concurrent execution would violate machine capacity
+        """
+        machines = set([
+            op[0]
+            for ops in self.job_dict.values()
+            for op in ops
+        ])
+
+        r_m = {}
+        for machine in machines:
+            # create the base list of ops on m (one of I_m x I_m)
+            ops_on_m = list([
+                {"job": job, "op_idx": op_idx}
+                for job, ops in self.job_dict.items()
+                for op_idx, op in enumerate(ops)
+                if (op[0] == machine)
+            ])
+
+            # a_m - list of machine usage schedules in which operation k starts BEFORE operation i finishes
+            a_m = [
+                (i, t, k, tprime)
+                for i, k in itertools.product(ops_on_m, repeat=2)
+                for t, tprime in itertools.product(self.time_vars[i["job"]][i["op_idx"]], self.time_vars[k["job"]][k["op_idx"]])
+                if (i != k)
+                and (t < tprime)
+                and ((tprime - t) < self.job_dict[i["job"]][i["op_idx"]][1])
+                and ((tprime - t) > 0)
+            ]
+
+            # b_m - list of machine usage schedules where two operations start at the same time and both of their
+            #       processing times are nonzero
+            b_m = [
+                (i, t, k, tprime)
+                for i, k in itertools.product(ops_on_m, repeat=2)
+                for t, tprime in itertools.product(self.time_vars[i["job"]][i["op_idx"]], self.time_vars[k["job"]][k["op_idx"]])
+                # for (i < k), we just need to pick one "side", the order of i,k doesn't really
+                # matter since they are at the same time (t == tprime)
+                #if i < k
+                if ((i["job"] < k["job"]) or
+                    ((i["job"] == k["job"]) and (i["op_idx"] < k["op_idx"])))
+                and (t == tprime)
+                and (self.job_dict[i["job"]][i["op_idx"]][1] > 0)
+                and (self.job_dict[k["job"]][k["op_idx"]][1] > 0)
+            ]
+
+            # convert to time variables
+            a_m_keys = [
+                ((i["job"], i["op_idx"] + 1, t), (k["job"], k["op_idx"] + 1, tprime))
+                for i, t, k, tprime in a_m
+            ]
+            b_m_keys = [
+                ((i["job"], i["op_idx"] + 1, t), (k["job"], k["op_idx"] + 1, tprime))
+                for i, t, k, tprime in b_m
+            ]
+
+            r_m[machine] = set(a_m_keys + b_m_keys)
+        return r_m
+
+    def get_precedence_pairs(self):
+        """
+        Return a list of pairs of time variables which cannot both be 1
+        """
+        precedence_list = {}
+        for job, ops in self.job_dict.items():
+            non_terminal_ops = list(range(len(ops) - 1))
+            precedence_list[job] = [
+                (i, t, i + 1, tprime) for i in non_terminal_ops
+                for t, tprime in itertools.product(self.time_vars[job][i], self.time_vars[job][i + 1])
+                if ((t + self.job_dict[job][i][1]) > tprime)
+            ]
+        return precedence_list
+
+    def get_time_vars(self):
+        """
+        return a dict of valid starting times for each job's operations
+        allow/remove invalid times with remove_impossible_times
+        dict is like {job: {op_1: [times]...
+        """
+        times_dict = {}
+        for job, ops in self.job_dict.items():
+            times_dict[job] = []
+            # account for current and future operations' processing time, -1 to allow processing in last slot
+            if self.remove_impossible_times == True:
+                forward_space = sum([op[1] for op in ops]) - 1
+            else:
+                forward_space = 0
+            # account for sum of previous operations' processing times
+            back_space = 0
+            for job_num, op in enumerate(ops, start=1):
+                start = back_space
+                end = self.max_time - forward_space
+                # +1 to adjust to 1 based indexing
+                times_dict[job].append([t + 1 for t in range(start, end)])
+                if self.remove_impossible_times == True:
+                    forward_space -= op[1]
+                    back_space += op[1]
+        return times_dict
+
+    def calc_max_time(self):
+        # use sum of times as max_time if not supplied
+        sum_times = 0
+        for job, ops in self.job_dict.items():
+            for op in ops:
+                sum_times += op[1]
+        return sum_times
+
+
+class DBCJSP(JSP):
+    """
+    A class to create JSPs using DwaveBinaryCsp
+    """
+    def __init__(self, job_dict, max_time=None, remove_impossible_times=True):
+        super().__init__(
+            job_dict=job_dict,
+            max_time=max_time,
+            remove_impossible_times=remove_impossible_times)
+        self.csp = dwavebinarycsp.ConstraintSatisfactionProblem(dwavebinarycsp.BINARY)
+
+        self.add_constraints()
+
+    def add_start_once_constraints(self, start_times):
+        for job, op_num, op_times in start_times:
+            constraint = dwavebinarycsp.Constraint.from_configurations(
+                get_one_hot_configs(len(op_times)),
+                ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times],
+                vartype="BINARY",
+                name="start_once"
+            )
+            self.csp.add_constraint(constraint)
+
+    def add_machine_cap_constraints(self, machines):
+        for machine_cap_pairs in machines.values():
+            for i, k in machine_cap_pairs:
+                constraint = dwavebinarycsp.Constraint.from_func(
+                    one_at_a_time,
+                    [
+                        "x_{}_o{}_t{}".format(i[0], i[1], i[2]),
+                        "x_{}_o{}_t{}".format(k[0], k[1], k[2])
+                    ],
+                    vartype="BINARY",
+                    name="one_at_a_time"
+                )
+                self.csp.add_constraint(constraint)
+
+    def add_precedence_constraints(self, precedence_pairs):
+        for job, pairs in precedence_pairs.items():
+            for i, t, k, tprime in pairs:
+                constraint = dwavebinarycsp.Constraint.from_func(
+                    enforce_precedence,
+                    ["x_{}_o{}_t{}".format(job, i + 1, t), "x_{}_o{}_t{}".format(job, k + 1, tprime)],
+                    vartype="BINARY",
+                    name="enforce_precedence"
+                )
+                self.csp.add_constraint(constraint)
 
 
 def start_once(*args):
@@ -34,148 +246,3 @@ def enforce_precedence(x_i_t, x_k_tprime):
     # this function penalizes schedules where the successor to operation i (k) cannot start before i has finished
     # input will be two start times where x_k_tprime must == 0, else it starts before its preceding operation finishes
     return (x_i_t * x_k_tprime) == 0
-
-
-class JobShopScheduler:
-    """
-    Implementation of the JSP described in https://arxiv.org/pdf/1506.08479.pdf
-    """
-
-    def __init__(self, job_dict, max_time=None, remove_impossible_times=True):
-        """
-        Args:
-            job_dict: A dict of job (string) to operation lists. An operation list is an ordered list of tuples, each
-                representing one operation and containing machine (string) and processing time (int).
-                E.g. {
-                        "j1": [("m1", 2), ("m2", 1), ("m3", 1)],
-                        "j2": [("m3", 2), ("m1", 1), ("m2", 2)],
-                        "j3": [("m2", 1), ("m1", 1), ("m3", 2)]
-                     }
-            max_time: The max allowed time for a schedule.
-            remove_impossible_times: Whether or not to remove (by never creating, as opposed to variable fixing)
-                impossible start/end times for a variable, considering other operations in the same job. E.g. if
-                job1 op1 has p=2, and max_time=7, any schedule where it starts executing in time 7 will be invalid,
-                s by the end of time 7, it will still be executing. This parameter reduces the number of variables
-                (and by extension, constraints).
-        """
-        self.job_dict = job_dict
-        self.max_time = max_time if max_time != None else self.calc_max_time()
-        self.remove_impossible_times = remove_impossible_times
-        self.csp = dwavebinarycsp.ConstraintSatisfactionProblem(dwavebinarycsp.BINARY)
-        self.add_constraints()
-
-    def add_constraints(self):
-        # Add constraints to the CSP, which also creates the variables
-        # times: the formulation has (0 ≤ t, t' ≤ T) but the figures seem to go by (1 ≤ t, t' ≤ T) I will use the
-        # latter as it makes more sense (especially regarding T)
-        job_times_dict = self.get_times()
-
-        # Constraint 1: start once
-        for job, ops in job_times_dict.items():
-            for op_num, op_times in enumerate(ops, start=1):
-                constraint = dwavebinarycsp.Constraint.from_configurations(
-                    get_one_hot_configs(len(op_times)),
-                    ["x_{}_o{}_t{}".format(job, op_num, op_time) for op_time in op_times],
-                    vartype="BINARY",
-                    name="start_once"
-                )
-                self.csp.add_constraint(constraint)
-
-        # Constraint 2: machine can only execute one operation per time
-        machines = set([op[0] for ops in self.job_dict.values()
-                              for op in ops])
-        for machine in machines:
-            # create the set a_m: {(i, t, k, t') : (i, k) ∈ I_m × I_m, i != k, 0 ≤ t, t' ≤ T, 0 < t' − t < p_i}
-            #                b_m: {(i, t, k, t') : (i, k) ∈ I_m × I_m, i < k, t' = t, p_i > 0, p_j > 0}
-            # NOTE: this creates lists of INVALID configuration, and the one_at_a_time constraint ensures that the
-            #       invalid configuration never occurs (x_i_t * x_k_tprime) == 0
-            # create the base list of ops on m (one of I_m x I_m)
-            ops_on_m = list([{"job": job, "op_idx": op_idx} for job, ops in self.job_dict.items()
-                                                            for op_idx, op in enumerate(ops)
-                                                            if (op[0] == machine)])
-            # a_m - list of machine usage schedules in which operation k starts BEFORE operation i finishes
-            a_m = [(i, t, k, tprime) for i, k in itertools.product(ops_on_m, repeat=2)
-                                     for t, tprime in itertools.product(job_times_dict[i["job"]][i["op_idx"]], job_times_dict[k["job"]][k["op_idx"]])
-                                        if (i != k)
-                                        and (t < tprime)
-                                        and ((tprime - t) < self.job_dict[i["job"]][i["op_idx"]][1])
-                                        and ((tprime - t) > 0)
-            ]
-            # b_m - list of machine usage schedules where two operations start at the same time and both of their
-            #       processing times are nonzero
-            b_m = [(i, t, k, tprime) for i, k in itertools.product(ops_on_m, repeat=2)
-                                     for t, tprime in itertools.product(job_times_dict[i["job"]][i["op_idx"]], job_times_dict[k["job"]][k["op_idx"]])
-                                        # for (i < k), we just need to pick one "side", the order of i,k doesn't really
-                                        # matter since they are at the same time (t == tprime)
-                                        #if i < k
-                                        if ((i["job"] < k["job"]) or
-                                            ((i["job"] == k["job"]) and (i["op_idx"] < k["op_idx"])))
-                                        and (t == tprime)
-                                        and (self.job_dict[i["job"]][i["op_idx"]][1] > 0)
-                                        and (self.job_dict[k["job"]][k["op_idx"]][1] > 0)
-            ]
-            # convert to time variables
-            a_m_time_vars = [("x_{}_o{}_t{}".format(i["job"], i["op_idx"] + 1, t), "x_{}_o{}_t{}".format(k["job"], k["op_idx"] + 1, tprime))
-                                for i, t, k, tprime in a_m
-            ]
-            b_m_time_vars = [("x_{}_o{}_t{}".format(i["job"], i["op_idx"] + 1, t), "x_{}_o{}_t{}".format(k["job"], k["op_idx"] + 1, tprime))
-                                for i, t, k, tprime in b_m
-            ]
-            r_m = set(a_m_time_vars + b_m_time_vars)
-            for pair in r_m:
-                constraint = dwavebinarycsp.Constraint.from_func(
-                    one_at_a_time,
-                    [pair[0], pair[1]],
-                    vartype="BINARY",
-                    name="one_at_a_time"
-                )
-                self.csp.add_constraint(constraint)
-
-        # Constraint 3, operation precedence
-        for job, ops in self.job_dict.items():
-            non_terminal_ops = list(range(len(ops) - 1))
-            precedence_list = [(i, t, i + 1, tprime) for i in non_terminal_ops
-                                                     for t, tprime in itertools.product(job_times_dict[job][i], job_times_dict[job][i + 1])
-                                                     if ((t + self.job_dict[job][i][1]) > tprime)
-            ]
-            for i, t, k, tprime in precedence_list:
-                constraint = dwavebinarycsp.Constraint.from_func(
-                    enforce_precedence,
-                    ["x_{}_o{}_t{}".format(job, i + 1, t), "x_{}_o{}_t{}".format(job, k + 1, tprime)],
-                    vartype="BINARY",
-                    name="enforce_precedence"
-                )
-                self.csp.add_constraint(constraint)
-
-    def get_times(self):
-        """
-        return a dict of valid starting times for each job's operations
-        allow/remove invalid times with remove_impossible_times
-        """
-        times_dict = {}
-        for job, ops in self.job_dict.items():
-            times_dict[job] = []
-            # account for current and future operations' processing time, -1 to allow processing in last slot
-            if self.remove_impossible_times == True:
-                forward_space = sum([op[1] for op in ops]) - 1
-            else:
-                forward_space = 0
-            # account for sum of previous operations' processing times
-            back_space = 0
-            for job_num, op in enumerate(ops, start=1):
-                start = back_space
-                end = self.max_time - forward_space
-                # +1 to adjust to 1 based indexing
-                times_dict[job].append([t + 1 for t in range(start, end)])
-                if self.remove_impossible_times == True:
-                    forward_space -= op[1]
-                    back_space += op[1]
-        return times_dict
-
-    def calc_max_time(self):
-        # use sum of times as max_time if not supplied
-        sum_times = 0
-        for job, ops in self.job_dict.items():
-            for op in ops:
-                sum_times += op[1]
-        return sum_times

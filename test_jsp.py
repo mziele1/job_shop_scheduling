@@ -47,7 +47,7 @@ class TestCSP(unittest.TestCase):
         }
         max_time = 7
 
-        jsp = jsp_mod.JobShopScheduler(jobs, max_time, True)
+        jsp = jsp_mod.DBCJSP(jobs, max_time, True)
         csp = jsp.csp
 
         valid_schedules = [{
