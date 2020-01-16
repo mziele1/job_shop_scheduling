@@ -219,7 +219,7 @@ class PyQuboJSP(JSP):
     """
     Class to create JSPs using PyQUBO
     """
-    def __init__(self, job_dict, max_time=None, remove_impossible_times=True, penalty_strength=1):
+    def __init__(self, job_dict, max_time=None, remove_impossible_times=True):
         # time_vars are required by bin_vars, which must exist before add_constraints
         super().__init__(
             job_dict=job_dict,
