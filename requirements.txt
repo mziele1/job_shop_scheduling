@@ -18,7 +18,7 @@ penaltymodel-lp==0.1.0
 penaltymodel-maxgap==0.5.1
 penaltymodel-mip==0.2.1
 plucky==0.4.3
-protobuf==3.11.2
+protobuf==3.15.0
 pyqubo==0.4.0
 PySMT==0.7.0
 PySocks==1.7.0
